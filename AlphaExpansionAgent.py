@@ -19,7 +19,7 @@ from tensorboardX import SummaryWriter
 
 
 env = gym.make('AlphaExpansion-v0').unwrapped
-env.seed(seed=int(round(time.time() * 1000)))
+env.seed(int(round(time.time() * 1000)))
 env.reset()
 env.render()
 
@@ -155,13 +155,13 @@ BATCH_SIZE = 128
 GAMMA = 0.999
 EPS_START = 0.9
 EPS_END = 0.05
-EPS_DECAY = 50
+EPS_DECAY = 100000
 TARGET_UPDATE = 10
 INPUT_HEIGHT = env.game.map.CHUNK_HEIGHT
 INPUT_WIDTH = env.game.map.CHUNK_WIDTH
 INPUT_DEPTH = 92
-ACTIONS = 30464  # 34x28x16x2=30464 possible actions
-ACTIONS_SHAPE = (34, 28, 16, 2)
+ACTIONS = 2 * 34 * INPUT_WIDTH * INPUT_HEIGHT  # 34x28x16x2=30464 possible actions at default
+ACTIONS_SHAPE = (2, 34, INPUT_WIDTH, INPUT_HEIGHT)
 env.ravel = False
 writer = SummaryWriter()
 
@@ -188,29 +188,55 @@ def select_action(state):
             # t.max(1) will return largest column value of each row.
             # second column on max result is index of where max element was
             # found, so we pick action with the larger expected reward.
-            return policy_net(state).max(1)[1].view(1, 1)
+            action_values = policy_net(state)
+            one_dimension_action = action_values.view(1, -1).max(1)[1]
+            return one_dimension_action.view(1, 1),\
+                   np.unravel_index(one_dimension_action.squeeze().cpu(),
+                                    ACTIONS_SHAPE)
     else:
-        return torch.tensor([[random.randrange(ACTIONS)]], device=device, dtype=torch.long)
+        one_dimension_action = torch.tensor([[random.randrange(ACTIONS)]], device=device, dtype=torch.long)
+        return one_dimension_action, \
+               np.unravel_index(one_dimension_action.squeeze().cpu(),
+                                ACTIONS_SHAPE)
 
 
-def action_space_map(action):
-    return action  #TODO: map correctly
+def reshape_to_environment(shape):
+    new_shape = (2, shape[1]//2, shape[2], shape[3])
+    return new_shape
 
 
-episode_durations = []
+episode_scores = []
+episode_rand_prob = []
 
 
-def plot_durations():
-    plt.figure(2)
+def plot_scores():
+    plt.figure(1)
     plt.clf()
-    durations_t = torch.tensor(episode_durations, dtype=torch.float)
+    scores_t = torch.tensor(episode_scores, dtype=torch.float)
     plt.title('Training...')
     plt.xlabel('Episode')
     plt.ylabel('Score')
-    plt.plot(durations_t.numpy())
+    plt.plot(scores_t.numpy())
     # Take 100 episode averages and plot them too
-    if len(durations_t) >= 100:
-        means = durations_t.unfold(0, 100, 1).mean(1).view(-1)
+    if len(scores_t) >= 100:
+        means = scores_t.unfold(0, 100, 1).mean(1).view(-1)
+        means = torch.cat((torch.zeros(99), means))
+        plt.plot(means.numpy())
+
+    plt.pause(0.001)  # pause a bit so that plots are updated
+
+
+def plot_rand_prob():
+    plt.figure(2)
+    plt.clf()
+    rand_prob_t = torch.tensor(episode_rand_prob, dtype=torch.float)
+    plt.title('Training...')
+    plt.xlabel('Episode')
+    plt.ylabel('Probability of Random Action')
+    plt.plot(rand_prob_t.numpy())
+    # Take 100 episode averages and plot them too
+    if len(rand_prob_t) >= 100:
+        means = rand_prob_t.unfold(0, 100, 1).mean(1).view(-1)
         means = torch.cat((torch.zeros(99), means))
         plt.plot(means.numpy())
 
@@ -239,7 +265,7 @@ def optimize_model():
     # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
     # columns of actions taken. These are the actions which would've been taken
     # for each batch state according to policy_net
-    state_action_values = policy_net(state_batch).gather(1, action_batch)
+    state_action_values = policy_net(state_batch).view(BATCH_SIZE, -1).gather(1, action_batch)
 
     # Compute V(s_{t+1}) for all next states.
     # Expected values of actions for non_final_next_states are computed based
@@ -247,7 +273,7 @@ def optimize_model():
     # This is merged based on the mask, such that we'll have either the expected
     # state value or 0 in case the state was final.
     next_state_values = torch.zeros(BATCH_SIZE, device=device)
-    next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0].detach()
+    next_state_values[non_final_mask] = target_net(non_final_next_states).view(1, -1).max(1)[0].detach()
     # Compute the expected Q values
     expected_state_action_values = (next_state_values * GAMMA) + reward_batch
 
@@ -293,10 +319,11 @@ for i_episode in range(num_episodes):
     score = 0.0
     for t in count():
         # Select and perform an action
-        action = select_action(state)
-        next_state, reward, done, _ = env.step(action)
+        one_dimensional_action, high_dimensional_action = select_action(state)
+        next_state, reward, done, _ = env.step(high_dimensional_action)
         next_state = state_preprocess(next_state)
-
+        if reward > 0:
+            env.render()
         score += reward
         reward = torch.tensor([reward], device=device)
 
@@ -305,7 +332,7 @@ for i_episode in range(num_episodes):
             env.render()
 
         # Store the transition in memory
-        memory.push(state, action, next_state, reward)
+        memory.push(state, one_dimensional_action, next_state, reward)
 
         # Move to the next state
         state = next_state
@@ -313,8 +340,13 @@ for i_episode in range(num_episodes):
         # Perform one step of the optimization (on the target network)
         optimize_model()
         if done:
-            episode_durations.append(score)
-            plot_durations()
+            episode_scores.append(score)
+            global steps_done
+            eps_threshold = EPS_END + (EPS_START - EPS_END) * \
+                            math.exp(-1. * steps_done / EPS_DECAY)
+            episode_rand_prob.append(eps_threshold)
+            plot_scores()
+            plot_rand_prob()
             break
     # Update the target network, copying all weights and biases in DQN
     if i_episode % TARGET_UPDATE == 0:
