@@ -69,17 +69,17 @@ class DQN(nn.Module):
         conv2_kernel_size = 3
         conv2_stride = 1
         conv2_padding = 1
-        conv2_output_depth = 2 * 34  # left right click * all building types
+        conv2_output_depth = 80
         self.conv2 = nn.Conv2d(conv1_output_depth, conv2_output_depth,
                                kernel_size=conv2_kernel_size, stride=conv2_stride, padding=conv2_padding)
         self.bn2 = nn.BatchNorm2d(conv2_output_depth)
-        # conv3_kernel_size = 5
-        # conv3_stride = 1
-        # conv3_padding = 2
-        # conv3_output_depth = 1
-        # self.conv3 = nn.Conv2d(conv2_output_depth, conv3_output_depth,
-        #                        kernel_size=conv3_kernel_size, stride=conv3_stride, padding=conv3_padding)
-        # self.bn3 = nn.BatchNorm2d(conv3_output_depth)
+        conv3_kernel_size = 3
+        conv3_stride = 1
+        conv3_padding = 1
+        conv3_output_depth = 34
+        self.conv3 = nn.Conv2d(conv2_output_depth, conv3_output_depth,
+                               kernel_size=conv3_kernel_size, stride=conv3_stride, padding=conv3_padding)
+        self.bn3 = nn.BatchNorm2d(conv3_output_depth)
 
         # Number of Linear input connections depends on output of conv2d layers
         # and therefore the input image size, so compute it.
@@ -89,29 +89,29 @@ class DQN(nn.Module):
         # convw = conv2d_size_out(w, kernel_size=conv1_kernel_size, stride=conv1_stride, padding=conv1_padding)
         # convh = conv2d_size_out(h, kernel_size=conv1_kernel_size, stride=conv1_stride, padding=conv1_padding)
 
-        convw = conv2d_size_out(
-            conv2d_size_out(w,
-                            kernel_size=conv1_kernel_size, stride=conv1_stride, padding=conv1_padding),
-            kernel_size=conv2_kernel_size, stride=conv2_stride, padding=conv2_padding)
-        convh = conv2d_size_out(
-            conv2d_size_out(h,
-                            kernel_size=conv1_kernel_size, stride=conv1_stride, padding=conv1_padding),
-            kernel_size=conv2_kernel_size, stride=conv2_stride, padding=conv2_padding)
-
         # convw = conv2d_size_out(
-        #     conv2d_size_out(
-        #         conv2d_size_out(w,
-        #                         kernel_size=conv1_kernel_size, stride=conv1_stride, padding=conv1_padding),
-        #         kernel_size=conv2_kernel_size, stride=conv2_stride, padding=conv2_padding),
-        #     kernel_size=conv3_kernel_size, stride=conv3_stride, padding=conv3_padding)
+        #     conv2d_size_out(w,
+        #                     kernel_size=conv1_kernel_size, stride=conv1_stride, padding=conv1_padding),
+        #     kernel_size=conv2_kernel_size, stride=conv2_stride, padding=conv2_padding)
         # convh = conv2d_size_out(
-        #     conv2d_size_out(
-        #         conv2d_size_out(h,
-        #                         kernel_size=conv1_kernel_size, stride=conv1_stride, padding=conv1_padding),
-        #         kernel_size=conv2_kernel_size, stride=conv2_stride, padding=conv2_padding),
-        #     kernel_size=conv3_kernel_size, stride=conv3_stride, padding=conv3_padding)
+        #     conv2d_size_out(h,
+        #                     kernel_size=conv1_kernel_size, stride=conv1_stride, padding=conv1_padding),
+        #     kernel_size=conv2_kernel_size, stride=conv2_stride, padding=conv2_padding)
 
-        linear_input_size = convw * convh * conv2_output_depth
+        convw = conv2d_size_out(
+            conv2d_size_out(
+                conv2d_size_out(w,
+                                kernel_size=conv1_kernel_size, stride=conv1_stride, padding=conv1_padding),
+                kernel_size=conv2_kernel_size, stride=conv2_stride, padding=conv2_padding),
+            kernel_size=conv3_kernel_size, stride=conv3_stride, padding=conv3_padding)
+        convh = conv2d_size_out(
+            conv2d_size_out(
+                conv2d_size_out(h,
+                                kernel_size=conv1_kernel_size, stride=conv1_stride, padding=conv1_padding),
+                kernel_size=conv2_kernel_size, stride=conv2_stride, padding=conv2_padding),
+            kernel_size=conv3_kernel_size, stride=conv3_stride, padding=conv3_padding)
+
+        # linear_input_size = convw * convh * conv2_output_depth
         # self.head = nn.Linear(linear_input_size, actions
 
     # Called with either one element to determine next action, or a batch
@@ -119,7 +119,7 @@ class DQN(nn.Module):
     def forward(self, x):
         x = F.selu(self.bn1(self.conv1(x)))
         x = F.selu(self.bn2(self.conv2(x)))
-        # x = F.selu(self.bn3(self.conv3(x)))
+        x = F.selu(self.bn3(self.conv3(x)))
         # return self.head(x.view(x.size(0), -1))
         # return x.view(x.size(0), -1)
         return x
@@ -212,34 +212,37 @@ def score_policy_net(render_every=0):
 #
 
 
-BATCH_SIZE = 128
+BATCH_SIZE = 256
 GAMMA = 0.999
-EPS_START = 0.9
+EPS_START = 0.5  # 0.9
 EPS_END = 0.05
-EPS_DECAY = 100000
+EPS_DECAY = 1000000
 TARGET_UPDATE = 1
 INPUT_HEIGHT = env.game.map.CHUNK_HEIGHT
 INPUT_WIDTH = env.game.map.CHUNK_WIDTH
 INPUT_DEPTH = 92
-ACTIONS = 2 * 34 * INPUT_WIDTH * INPUT_HEIGHT  # 34x28x16x2=30464 possible actions at default
-ACTIONS_SHAPE = (2, 34, INPUT_WIDTH, INPUT_HEIGHT)
+ACTIONS = 34 * INPUT_WIDTH * INPUT_HEIGHT  # 34x28x16=15232 possible actions at default
+ACTIONS_SHAPE = (34, INPUT_WIDTH, INPUT_HEIGHT)
 env.ravel = False
 writer = SummaryWriter()
 
 policy_net = DQN(INPUT_HEIGHT, INPUT_WIDTH, INPUT_DEPTH, ACTIONS).to(device)
 target_net = DQN(INPUT_HEIGHT, INPUT_WIDTH, INPUT_DEPTH, ACTIONS).to(device)
-best_guy_state_dict = torch.load('best_guy.pt', map_location=device)
+try:
+    best_guy_state_dict = torch.load('best_guy.pt', map_location=device)
+except FileNotFoundError as e:
+    best_guy_state_dict = None
 max_score = None
 if best_guy_state_dict:
     print('loaded best guy from best_guy.pt')
     initialization_dict = policy_net.state_dict()
     policy_net.load_state_dict(best_guy_state_dict)
     max_score = score_policy_net(render_every=1)
-    policy_net.load_state_dict(initialization_dict)
+    # policy_net.load_state_dict(initialization_dict)
 target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 
-optimizer = optim.Adam(policy_net.parameters())
+optimizer = optim.SGD(policy_net.parameters(), lr=0.01, momentum=0.9)
 memory = ReplayMemory(100000)
 
 
