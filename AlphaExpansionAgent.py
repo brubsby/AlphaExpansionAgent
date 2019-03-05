@@ -8,7 +8,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 from collections import namedtuple
 from itertools import count
-from PIL import Image
+import profile
 
 import torch
 import torch.nn as nn
@@ -19,7 +19,8 @@ from tensorboardX import SummaryWriter
 
 
 env = gym.make('AlphaExpansion-v0').unwrapped
-env.seed(int(round(time.time() * 1000)))
+env.seed(999999999999)
+# env.seed(int(round(time.time() * 1000)))
 env.reset()
 env.render()
 
@@ -124,6 +125,66 @@ class DQN(nn.Module):
         return x
 
 
+steps_done = 0
+
+
+def select_action(state):
+    global steps_done
+    sample = random.random()
+    eps_threshold = EPS_END + (EPS_START - EPS_END) * \
+        math.exp(-1. * steps_done / EPS_DECAY)
+    steps_done += 1
+    if sample > eps_threshold:
+        with torch.no_grad():
+            # t.max(1) will return largest column value of each row.
+            # second column on max result is index of where max element was
+            # found, so we pick action with the larger expected reward.
+            action_values = policy_net(state)
+            one_dimension_action = action_values.view(1, -1).max(1)[1]
+            return one_dimension_action.view(1, 1),\
+                   np.unravel_index(one_dimension_action.squeeze().cpu(),
+                                    ACTIONS_SHAPE)
+    else:
+        one_dimension_action = torch.tensor([[random.randrange(ACTIONS)]], device=device, dtype=torch.long)
+        return one_dimension_action, \
+               np.unravel_index(one_dimension_action.squeeze().cpu(),
+                                ACTIONS_SHAPE)
+
+
+def state_preprocess(state):
+    return torch.from_numpy(np.dstack((
+            state["relative_income"],
+            state["terrain"],
+            state["buildings"],
+            state["building_levels"],
+            state["can_upgrade"],
+            state["can_build"]
+        ))).type(torch.cuda.FloatTensor).permute(2, 0, 1).unsqueeze(0)
+
+
+def score_policy_net(render_every=0):
+    start_score_time = time.time()
+    state = state_preprocess(env.reset())
+    score = 0
+    for t in count():
+        # Select and perform an action
+        one_dimensional_action, high_dimensional_action = select_action(state)
+        next_state, reward, done, _ = env.step(high_dimensional_action)
+        next_state = state_preprocess(next_state)
+        score += reward
+
+        # Move to the next state
+        state = next_state
+        if render_every and t % render_every == 0:
+            env.render()
+        if done:
+            break
+
+    score_time = time.time() - start_score_time
+    print("Network scored in " + str(score_time) + " seconds. Score was " + str(score) + ".")
+    return score
+
+
 
 
 
@@ -156,7 +217,7 @@ GAMMA = 0.999
 EPS_START = 0.9
 EPS_END = 0.05
 EPS_DECAY = 100000
-TARGET_UPDATE = 10
+TARGET_UPDATE = 1
 INPUT_HEIGHT = env.game.map.CHUNK_HEIGHT
 INPUT_WIDTH = env.game.map.CHUNK_WIDTH
 INPUT_DEPTH = 92
@@ -167,37 +228,19 @@ writer = SummaryWriter()
 
 policy_net = DQN(INPUT_HEIGHT, INPUT_WIDTH, INPUT_DEPTH, ACTIONS).to(device)
 target_net = DQN(INPUT_HEIGHT, INPUT_WIDTH, INPUT_DEPTH, ACTIONS).to(device)
+best_guy_state_dict = torch.load('best_guy.pt', map_location=device)
+max_score = None
+if best_guy_state_dict:
+    print('loaded best guy from best_guy.pt')
+    initialization_dict = policy_net.state_dict()
+    policy_net.load_state_dict(best_guy_state_dict)
+    max_score = score_policy_net(render_every=1)
+    policy_net.load_state_dict(initialization_dict)
 target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 
 optimizer = optim.Adam(policy_net.parameters())
 memory = ReplayMemory(100000)
-
-
-steps_done = 0
-
-
-def select_action(state):
-    global steps_done
-    sample = random.random()
-    eps_threshold = EPS_END + (EPS_START - EPS_END) * \
-        math.exp(-1. * steps_done / EPS_DECAY)
-    steps_done += 1
-    if sample > eps_threshold:
-        with torch.no_grad():
-            # t.max(1) will return largest column value of each row.
-            # second column on max result is index of where max element was
-            # found, so we pick action with the larger expected reward.
-            action_values = policy_net(state)
-            one_dimension_action = action_values.view(1, -1).max(1)[1]
-            return one_dimension_action.view(1, 1),\
-                   np.unravel_index(one_dimension_action.squeeze().cpu(),
-                                    ACTIONS_SHAPE)
-    else:
-        one_dimension_action = torch.tensor([[random.randrange(ACTIONS)]], device=device, dtype=torch.long)
-        return one_dimension_action, \
-               np.unravel_index(one_dimension_action.squeeze().cpu(),
-                                ACTIONS_SHAPE)
 
 
 def reshape_to_environment(shape):
@@ -287,17 +330,6 @@ def optimize_model():
     #     param.grad.data.clamp_(-1, 1)
     optimizer.step()
 
-
-def state_preprocess(state):
-    return torch.from_numpy(np.dstack((
-            state["relative_income"],
-            state["terrain"],
-            state["buildings"],
-            state["building_levels"],
-            state["can_upgrade"],
-            state["can_build"]
-        ))).type(torch.cuda.FloatTensor).permute(2, 0, 1).unsqueeze(0)
-
 ######################################################################
 #
 # Below, you can find the main training loop. At the beginning we reset
@@ -322,14 +354,13 @@ for i_episode in range(num_episodes):
         one_dimensional_action, high_dimensional_action = select_action(state)
         next_state, reward, done, _ = env.step(high_dimensional_action)
         next_state = state_preprocess(next_state)
-        if reward > 0:
+        if t % 100 == 0:
             env.render()
         score += reward
         reward = torch.tensor([reward], device=device)
 
         if done:
             next_state = None
-            env.render()
 
         # Store the transition in memory
         memory.push(state, one_dimensional_action, next_state, reward)
@@ -347,6 +378,12 @@ for i_episode in range(num_episodes):
             episode_rand_prob.append(eps_threshold)
             plot_scores()
             plot_rand_prob()
+
+            network_score = score_policy_net()  # don't use random actions and see how the network does
+            if max_score is None or network_score > max_score:
+                max_score = network_score
+                print('saving best guy as best_guy.pt')
+                torch.save(policy_net.state_dict(), 'best_guy.pt')
             break
     # Update the target network, copying all weights and biases in DQN
     if i_episode % TARGET_UPDATE == 0:
