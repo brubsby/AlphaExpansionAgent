@@ -73,9 +73,9 @@ class DQN(nn.Module):
         self.conv2 = nn.Conv2d(conv1_output_depth, conv2_output_depth,
                                kernel_size=conv2_kernel_size, stride=conv2_stride, padding=conv2_padding)
         self.bn2 = nn.BatchNorm2d(conv2_output_depth)
-        conv3_kernel_size = 3
+        conv3_kernel_size = 1
         conv3_stride = 1
-        conv3_padding = 1
+        conv3_padding = 0
         conv3_output_depth = 34
         self.conv3 = nn.Conv2d(conv2_output_depth, conv3_output_depth,
                                kernel_size=conv3_kernel_size, stride=conv3_stride, padding=conv3_padding)
@@ -157,6 +157,7 @@ def state_preprocess(state):
             state["terrain"],
             state["buildings"],
             state["building_levels"],
+            state["building_efficiencies"],
             state["can_upgrade"],
             state["can_build"]
         ))).type(torch.cuda.FloatTensor).permute(2, 0, 1).unsqueeze(0)
@@ -214,13 +215,13 @@ def score_policy_net(render_every=0):
 
 BATCH_SIZE = 256
 GAMMA = 0.999
-EPS_START = 0.5  # 0.9
+EPS_START = 0.9
 EPS_END = 0.05
 EPS_DECAY = 1000000
 TARGET_UPDATE = 1
 INPUT_HEIGHT = env.game.map.CHUNK_HEIGHT
 INPUT_WIDTH = env.game.map.CHUNK_WIDTH
-INPUT_DEPTH = 92
+INPUT_DEPTH = 93
 ACTIONS = 34 * INPUT_WIDTH * INPUT_HEIGHT  # 34x28x16=15232 possible actions at default
 ACTIONS_SHAPE = (34, INPUT_WIDTH, INPUT_HEIGHT)
 env.ravel = False
@@ -238,7 +239,7 @@ if best_guy_state_dict:
     initialization_dict = policy_net.state_dict()
     policy_net.load_state_dict(best_guy_state_dict)
     max_score = score_policy_net(render_every=1)
-    # policy_net.load_state_dict(initialization_dict)
+    policy_net.load_state_dict(initialization_dict)
 target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 
@@ -375,7 +376,6 @@ for i_episode in range(num_episodes):
         optimize_model()
         if done:
             episode_scores.append(score)
-            global steps_done
             eps_threshold = EPS_END + (EPS_START - EPS_END) * \
                             math.exp(-1. * steps_done / EPS_DECAY)
             episode_rand_prob.append(eps_threshold)
